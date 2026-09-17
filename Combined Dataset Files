@@ -1,0 +1,98 @@
+counts <- read.delim("GSE234449_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+                             row.names = 1)
+
+annot <- read.delim("Human.GRCh38.p13.annot.tsv.gz")
+
+counts$gene_symbol <- annot$Symbol[match(rownames(counts),annot$GeneID)]
+
+counts <- counts[!is.na(counts$gene_symbol), ]
+
+counts <- counts %>%
+  group_by(gene_symbol) %>%
+  summarise(across(where(is.numeric), sum))
+
+counts <- as.data.frame(counts)
+rownames(counts) <- counts$gene_symbol
+counts$gene_symbol <- NULL
+any(duplicated(rownames(counts)))
+
+--------------Main Expression Analysis------------
+gse_meta <- getGEO("GSE234449", GSEMatrix = TRUE)
+meta <- pData(gse_meta[[1]])
+
+meta$title
+sample_info <- meta[, c("title", "geo_accession")]
+sample_info
+
+cell_type <- ifelse(grepl("MRTXR", sample_info$title),
+                    "Resistant", "Parental")
+
+treatment <- ifelse(grepl("60nM", sample_info$title),
+                    "MRTX1133", "Untreated")
+
+metadata <- data.frame(
+  row.names = sample_info$geo_accession,
+  cell_type = factor(cell_type),
+  treatment = factor(treatment)
+)
+
+metadata
+metadata <- metadata[colnames(counts), ]
+all(rownames(metadata) == colnames(counts)) # not an essential step but necessary to check the correctness of the data
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData = metadata,
+  design = ~ cell_type + treatment
+)
+
+dds <- DESeq(dds)
+dds_untreated <- dds[, dds$treatment == "Untreated"]
+
+dds_untreated$cell_type <- droplevels(dds_untreated$cell_type)
+
+# IMPORTANT: redefine design
+design(dds_untreated) <- ~ cell_type
+
+dds_untreated <- DESeq(dds_untreated)
+
+res_resistance <- results(dds_untreated,
+                          contrast = c("cell_type",
+                                       "Resistant",
+                                       "Parental"))
+
+summary(res_resistance)
+sig_res <- res_resistance[which(res_resistance$padj < 0.05), ]
+
+nrow(sig_res)
+
+up_genes <- sig_res[sig_res$log2FoldChange > 0, ]
+nrow(up_genes)
+
+EnhancedVolcano(res_resistance,
+                lab = rownames(res_resistance),
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+                FCcutoff = 1,
+                title = "Resistant vs Parental (Untreated)")
+
+fgfr_genes <- c("FGFR1","FGFR2","FGFR3","FGFR4") # FGFR pathway genes
+
+res_resistance[rownames(res_resistance) %in% fgfr_genes, ]
+
+#RTK pathway genes
+rtk_genes <- c("FGFR1","FGFR2","FGFR3","FGFR4",
+               "FRS2","GRB2","SOS1",
+               "MAPK1","MAPK3",
+               "PIK3CA","AKT1",
+               "MTOR")
+
+vsd_untreated <- vst(dds_untreated, blind = FALSE)
+mat <- assay(vsd_untreated)[rtk_genes, ]
+pheatmap(mat,
+         scale = "row",
+         annotation_col = as.data.frame(colData(dds_untreated)),
+         main = "RTK/FGFR Signaling in Resistant vs Parental")
+
+
